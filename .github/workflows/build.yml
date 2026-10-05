@@ -1,0 +1,426 @@
+name: Build dsniff for OpenWrt
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+
+  # ============================================================
+  # Target 1: SIMAX1800T / MT7621
+  # OpenWrt 23.05.5
+  # ============================================================
+  dsniff-mt7621:
+    name: dsniff - OpenWrt 23.05.5 - MT7621
+    runs-on: ubuntu-latest
+
+    env:
+      OPENWRT_VERSION: "23.05.5"
+      OPENWRT_TARGET: "ramips/mt7621"
+      SDK_ARCHIVE: "openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+      SDK_SHA256: "97ac89bcd590cf882bad8e027d893ab073959628b69e9e43829a2ccfb1e11e29"
+      SDK_URL: "https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt7621/openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+
+    steps:
+      - name: Checkout dsniff fork
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            gawk \
+            gcc \
+            g++ \
+            gettext \
+            git \
+            libncurses-dev \
+            libssl-dev \
+            rsync \
+            unzip \
+            zlib1g-dev \
+            file \
+            wget \
+            curl \
+            xz-utils \
+            zstd \
+            python3 \
+            python3-distutils
+
+      - name: Download OpenWrt SDK
+        run: |
+          set -e
+
+          mkdir -p sdk-download
+          cd sdk-download
+
+          echo "Downloading:"
+          echo "$SDK_URL"
+
+          wget -q --show-progress "$SDK_URL"
+
+          echo "Checking SHA256..."
+          echo "$SDK_SHA256  $SDK_ARCHIVE" | sha256sum -c -
+
+          echo "Extracting SDK..."
+          tar -xf "$SDK_ARCHIVE"
+
+          SDK_DIR="$(find . -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
+
+          if [ -z "$SDK_DIR" ]; then
+            echo "ERROR: SDK directory was not found"
+            exit 1
+          fi
+
+          mv "$SDK_DIR" ../sdk
+
+      - name: Show SDK information
+        run: |
+          set -e
+
+          cd sdk
+
+          echo "========================================"
+          echo "OpenWrt SDK information"
+          echo "========================================"
+
+          echo "OpenWrt version:"
+          grep -E 'CONFIG_VERSION_NUMBER|CONFIG_VERSION_REPO' .config 2>/dev/null || true
+
+          echo
+          echo "Target:"
+          grep -E 'CONFIG_TARGET_|CONFIG_ARCH' .config 2>/dev/null | head -40 || true
+
+          echo
+          echo "Toolchain:"
+          ./staging_dir/host/bin/gcc --version || true
+
+          echo
+          echo "========================================"
+
+      - name: Install OpenWrt feeds
+        run: |
+          set -e
+
+          cd sdk
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Prepare dsniff package
+        run: |
+          set -e
+
+          cd sdk
+
+          mkdir -p package/feeds/custom/dsniff
+
+          cp -a "$GITHUB_WORKSPACE/openwrt/package/dsniff/." \
+                package/feeds/custom/dsniff/
+
+          echo "========================================"
+          echo "dsniff package definition"
+          echo "========================================"
+
+          find package/feeds/custom/dsniff -maxdepth 3 -type f -print
+
+          echo
+          sed -n '1,260p' package/feeds/custom/dsniff/Makefile
+
+      - name: Configure SDK
+        run: |
+          set -e
+
+          cd sdk
+
+          make defconfig
+
+      - name: Build dsniff package
+        run: |
+          set -e
+
+          cd sdk
+
+          make package/feeds/custom/dsniff/compile V=s -j"$(nproc)"
+
+      - name: Verify generated packages
+        run: |
+          set -e
+
+          cd sdk
+
+          echo "========================================"
+          echo "Generated IPK files"
+          echo "========================================"
+
+          find bin/packages -type f -name '*.ipk' -print | sort
+
+          echo
+          echo "dsniff packages:"
+          find bin/packages -type f -name 'dsniff*.ipk' -print
+
+          if ! find bin/packages -type f -name 'dsniff*.ipk' | grep -q .; then
+            echo "ERROR: No dsniff IPK was generated."
+            exit 1
+          fi
+
+      - name: Collect artifacts
+        run: |
+          set -e
+
+          rm -rf output
+          mkdir -p output
+
+          find sdk/bin/packages \
+            -type f \
+            -name 'dsniff*.ipk' \
+            -exec cp {} output/ \;
+
+          find sdk/bin/packages \
+            -type f \
+            -name 'libnet*.ipk' \
+            -exec cp {} output/ \; || true
+
+          find sdk/bin/packages \
+            -type f \
+            -name 'libnids*.ipk' \
+            -exec cp {} output/ \; || true
+
+          cat > output/BUILD_INFO.txt <<EOF
+          Package: dsniff
+          Source: $GITHUB_REPOSITORY
+          Commit: $GITHUB_SHA
+          OpenWrt: $OPENWRT_VERSION
+          Target: $OPENWRT_TARGET
+          SDK: $SDK_ARCHIVE
+          Architecture: mipsel_24kc
+          EOF
+
+          echo "========================================"
+          echo "Final artifacts"
+          echo "========================================"
+
+          ls -lah output
+
+      - name: Upload MT7621 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsniff-openwrt-23.05.5-mt7621
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
+
+
+  # ============================================================
+  # Target 2: Hyp537 / MediaTek Filogic
+  # OpenWrt 24.10.0
+  # ============================================================
+  dsniff-filogic:
+    name: dsniff - OpenWrt 24.10.0 - Filogic
+    runs-on: ubuntu-latest
+
+    env:
+      OPENWRT_VERSION: "24.10.0"
+      OPENWRT_TARGET: "mediatek/filogic"
+      SDK_ARCHIVE: "openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+      SDK_SHA256: "d1dbcb4ffc21beae4da92e05aaab91b0ddfca95f12633205d0ed9ba9aecceb3b"
+      SDK_URL: "https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic/openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+
+    steps:
+      - name: Checkout dsniff fork
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            gawk \
+            gcc \
+            g++ \
+            gettext \
+            git \
+            libncurses-dev \
+            libssl-dev \
+            rsync \
+            unzip \
+            zlib1g-dev \
+            file \
+            wget \
+            curl \
+            xz-utils \
+            zstd \
+            python3 \
+            python3-distutils
+
+      - name: Download OpenWrt SDK
+        run: |
+          set -e
+
+          mkdir -p sdk-download
+          cd sdk-download
+
+          echo "Downloading:"
+          echo "$SDK_URL"
+
+          wget -q --show-progress "$SDK_URL"
+
+          echo "Checking SHA256..."
+          echo "$SDK_SHA256  $SDK_ARCHIVE" | sha256sum -c -
+
+          echo "Extracting SDK..."
+          tar --use-compress-program=unzstd -xf "$SDK_ARCHIVE"
+
+          SDK_DIR="$(find . -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
+
+          if [ -z "$SDK_DIR" ]; then
+            echo "ERROR: SDK directory was not found"
+            exit 1
+          fi
+
+          mv "$SDK_DIR" ../sdk
+
+      - name: Show SDK information
+        run: |
+          set -e
+
+          cd sdk
+
+          echo "========================================"
+          echo "OpenWrt SDK information"
+          echo "========================================"
+
+          echo "OpenWrt version:"
+          grep -E 'CONFIG_VERSION_NUMBER|CONFIG_VERSION_REPO' .config 2>/dev/null || true
+
+          echo
+          echo "Target:"
+          grep -E 'CONFIG_TARGET_|CONFIG_ARCH' .config 2>/dev/null | head -40 || true
+
+          echo
+          echo "Toolchain:"
+          ./staging_dir/host/bin/gcc --version || true
+
+          echo
+          echo "========================================"
+
+      - name: Install OpenWrt feeds
+        run: |
+          set -e
+
+          cd sdk
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Prepare dsniff package
+        run: |
+          set -e
+
+          cd sdk
+
+          mkdir -p package/feeds/custom/dsniff
+
+          cp -a "$GITHUB_WORKSPACE/openwrt/package/dsniff/." \
+                package/feeds/custom/dsniff/
+
+          echo "========================================"
+          echo "dsniff package definition"
+          echo "========================================"
+
+          find package/feeds/custom/dsniff -maxdepth 3 -type f -print
+
+          echo
+          sed -n '1,260p' package/feeds/custom/dsniff/Makefile
+
+      - name: Configure SDK
+        run: |
+          set -e
+
+          cd sdk
+
+          make defconfig
+
+      - name: Build dsniff package
+        run: |
+          set -e
+
+          cd sdk
+
+          make package/feeds/custom/dsniff/compile V=s -j"$(nproc)"
+
+      - name: Verify generated packages
+        run: |
+          set -e
+
+          cd sdk
+
+          echo "========================================"
+          echo "Generated IPK files"
+          echo "========================================"
+
+          find bin/packages -type f -name '*.ipk' -print | sort
+
+          echo
+          echo "dsniff packages:"
+          find bin/packages -type f -name 'dsniff*.ipk' -print
+
+          if ! find bin/packages -type f -name 'dsniff*.ipk' | grep -q .; then
+            echo "ERROR: No dsniff IPK was generated."
+            exit 1
+          fi
+
+      - name: Collect artifacts
+        run: |
+          set -e
+
+          rm -rf output
+          mkdir -p output
+
+          find sdk/bin/packages \
+            -type f \
+            -name 'dsniff*.ipk' \
+            -exec cp {} output/ \;
+
+          find sdk/bin/packages \
+            -type f \
+            -name 'libnet*.ipk' \
+            -exec cp {} output/ \; || true
+
+          find sdk/bin/packages \
+            -type f \
+            -name 'libnids*.ipk' \
+            -exec cp {} output/ \; || true
+
+          cat > output/BUILD_INFO.txt <<EOF
+          Package: dsniff
+          Source: $GITHUB_REPOSITORY
+          Commit: $GITHUB_SHA
+          OpenWrt: $OPENWRT_VERSION
+          Target: $OPENWRT_TARGET
+          SDK: $SDK_ARCHIVE
+          Architecture: aarch64_cortex-a53
+          EOF
+
+          echo "========================================"
+          echo "Final artifacts"
+          echo "========================================"
+
+          ls -lah output
+
+      - name: Upload Filogic artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsniff-openwrt-24.10.0-filogic
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
