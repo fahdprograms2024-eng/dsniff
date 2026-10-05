@@ -131,7 +131,37 @@ jobs:
 
           echo
           sed -n '1,260p' package/feeds/custom/dsniff/Makefile
+      - name: Check Berkeley DB packages
+        run: |
+          set -e
+          cd sdk
 
+          echo "========================================"
+          echo "Searching OpenWrt feeds for Berkeley DB"
+          echo "========================================"
+
+          ./scripts/feeds search berkeley || true
+          ./scripts/feeds search libdb || true
+
+          echo
+          echo "========================================"
+          echo "Searching package definitions"
+          echo "========================================"
+
+          grep -Rni \
+            -E 'Berkeley DB|berkeley-db|libdb|db_185|dbopen' \
+            package feeds \
+            2>/dev/null | head -300 || true
+
+          echo
+          echo "========================================"
+          echo "Staging DB headers/libraries"
+          echo "========================================"
+
+          find staging_dir -type f \
+            \( -name 'db.h' -o -name 'libdb.so*' -o -name 'libdb.a' \) \
+            2>/dev/null | head -100 || true
+            
       - name: Configure SDK
         run: |
           set -e
