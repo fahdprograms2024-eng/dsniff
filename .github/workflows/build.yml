@@ -51,7 +51,6 @@ jobs:
             xz-utils \
             zstd \
             python3 \
-            python3-distutils
 
       - name: Download OpenWrt SDK
         run: |
@@ -260,7 +259,6 @@ jobs:
             xz-utils \
             zstd \
             python3 \
-            python3-distutils
 
       - name: Download OpenWrt SDK
         run: |
