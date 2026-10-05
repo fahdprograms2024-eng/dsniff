@@ -1,454 +1,431 @@
-name: Build dsniff for OpenWrt
+name: Build dsniff OpenWrt IPKs
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which SDK to build (mt7621, filogic, all)'
+        required: false
+        default: 'filogic'
+        type: choice
+        options:
+          - mt7621
+          - filogic
+          - all
+
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
 
-  # ============================================================
-  # Target 1: SIMAX1800T / MT7621
-  # OpenWrt 23.05.5
-  # ============================================================
-  dsniff-mt7621:
-    name: dsniff - OpenWrt 23.05.5 - MT7621
-    runs-on: ubuntu-latest
+  build-mt7621:
+    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'mt7621' || github.event.inputs.target == 'all' }}
 
-    env:
-      OPENWRT_VERSION: "23.05.5"
-      OPENWRT_TARGET: "ramips/mt7621"
-      SDK_ARCHIVE: "openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
-      SDK_SHA256: "97ac89bcd590cf882bad8e027d893ab073959628b69e9e43829a2ccfb1e11e29"
-      SDK_URL: "https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt7621/openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+    name: dsniff - MT7621 - OpenWrt 23.05.5
+
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout dsniff fork
+
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             build-essential \
             clang \
             flex \
             bison \
             gawk \
-            gcc \
-            g++ \
             gettext \
             git \
             libncurses-dev \
             libssl-dev \
+            python3 \
+            python3-pip \
+            python3-setuptools \
             rsync \
             unzip \
-            zlib1g-dev \
-            file \
             wget \
-            curl \
-            xz-utils \
             zstd \
-            python3 \
+            xz-utils \
+            file
 
-      - name: Download OpenWrt SDK
+      - name: Download OpenWrt 23.05.5 MT7621 SDK
+        working-directory: ${{ runner.temp }}
         run: |
-          set -e
+          set -euo pipefail
 
-          mkdir -p sdk-download
-          cd sdk-download
+          SDK="openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+          BASE="https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt7621"
 
-          echo "Downloading:"
-          echo "$SDK_URL"
+          wget -q --timeout=30 --tries=3 \
+            "$BASE/$SDK"
 
-          wget -q --show-progress "$SDK_URL"
+          wget -q --timeout=30 --tries=3 \
+            "$BASE/sha256sums"
 
-          echo "Checking SHA256..."
-          echo "$SDK_SHA256  $SDK_ARCHIVE" | sha256sum -c -
+          EXPECTED_SHA="$(
+            awk -v sdk="$SDK" '
+              {
+                file = $2
+                gsub(/\r/, "", file)
+                sub(/^\*/, "", file)
+                sub(/^\.\//, "", file)
 
-          echo "Extracting SDK..."
-          tar -xf "$SDK_ARCHIVE"
+                n = split(file, parts, "/")
 
-          SDK_DIR="$(find . -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
+                if (n > 0)
+                  file = parts[n]
 
-          if [ -z "$SDK_DIR" ]; then
-            echo "ERROR: SDK directory was not found"
+                if (file == sdk) {
+                  print $1
+                  exit
+                }
+              }
+            ' sha256sums
+          )"
+
+          if [ -z "$EXPECTED_SHA" ]; then
+            echo "No checksum found for $SDK"
             exit 1
           fi
 
-          mv "$SDK_DIR" ../sdk
+          printf '%s  %s\n' \
+            "$EXPECTED_SHA" \
+            "$SDK" | sha256sum -c -
 
-      - name: Show SDK information
+          tar -xf "$SDK"
+
+          SDK_DIR="${SDK%.tar.xz}"
+
+          echo "SDK_DIR=$RUNNER_TEMP/$SDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Prepare dsniff package
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          mkdir -p "$SDK_DIR/package/dsniff"
 
-          echo "========================================"
-          echo "OpenWrt SDK information"
-          echo "========================================"
+          cp -a \
+            package/dsniff/. \
+            "$SDK_DIR/package/dsniff/"
 
-          echo "OpenWrt version:"
-          grep -E 'CONFIG_VERSION_NUMBER|CONFIG_VERSION_REPO' .config 2>/dev/null || true
+          echo "=== package/dsniff ==="
 
-          echo
-          echo "Target:"
-          grep -E 'CONFIG_TARGET_|CONFIG_ARCH' .config 2>/dev/null | head -40 || true
+          find \
+            "$SDK_DIR/package/dsniff" \
+            -maxdepth 3 \
+            -type f \
+            -print
 
-          echo
-          echo "Toolchain:"
-          ./staging_dir/host/bin/gcc --version || true
-
-          echo
-          echo "========================================"
-
-      - name: Install OpenWrt feeds
+      - name: Update feeds
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
-
-          cd sdk
+          set -eux
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Prepare dsniff package
+      - name: Verify required dependencies
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          echo "=== Berkeley DB ==="
 
-          mkdir -p package/feeds/custom/dsniff
+          ./scripts/feeds search libdb47 || true
 
-          cp -a "$GITHUB_WORKSPACE/openwrt/package/dsniff/." \
-                package/feeds/custom/dsniff/
+          find feeds package \
+            -type f \
+            -path '*/db/Makefile' \
+            -print 2>/dev/null || true
 
-          echo "========================================"
-          echo "dsniff package definition"
-          echo "========================================"
-
-          find package/feeds/custom/dsniff -maxdepth 3 -type f -print
-
-          echo
-          sed -n '1,260p' package/feeds/custom/dsniff/Makefile
-      - name: Check Berkeley DB packages
-        run: |
-          set -e
-          cd sdk
-
-          echo "========================================"
-          echo "Searching OpenWrt feeds for Berkeley DB"
-          echo "========================================"
-
-          ./scripts/feeds search berkeley || true
-          ./scripts/feeds search libdb || true
-
-          echo
-          echo "========================================"
-          echo "Searching package definitions"
-          echo "========================================"
-
-          grep -Rni \
-            -E 'Berkeley DB|berkeley-db|libdb|db_185|dbopen' \
-            package feeds \
-            2>/dev/null | head -300 || true
-
-          echo
-          echo "========================================"
-          echo "Staging DB headers/libraries"
-          echo "========================================"
-
-          find staging_dir -type f \
-            \( -name 'db.h' -o -name 'libdb.so*' -o -name 'libdb.a' \) \
-            2>/dev/null | head -100 || true
-            
       - name: Configure SDK
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          export TERM=xterm
 
-          make defconfig
+          yes "" | make defconfig
 
-      - name: Build dsniff package
+      - name: Build dsniff
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          make package/dsniff/clean V=s || true
 
-          make package/feeds/custom/dsniff/compile V=s -j"$(nproc)"
+          make package/dsniff/compile V=s
 
-      - name: Verify generated packages
+      - name: Verify package
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          echo "=== IPK files ==="
 
-          echo "========================================"
-          echo "Generated IPK files"
-          echo "========================================"
-
-          find bin/packages -type f -name '*.ipk' -print | sort
-
-          echo
-          echo "dsniff packages:"
-          find bin/packages -type f -name 'dsniff*.ipk' -print
-
-          if ! find bin/packages -type f -name 'dsniff*.ipk' | grep -q .; then
-            echo "ERROR: No dsniff IPK was generated."
-            exit 1
-          fi
-
-      - name: Collect artifacts
-        run: |
-          set -e
-
-          rm -rf output
-          mkdir -p output
-
-          find sdk/bin/packages \
+          find bin/packages \
             -type f \
-            -name 'dsniff*.ipk' \
-            -exec cp {} output/ \;
+            -name 'dsniff_*.ipk' \
+            -print
 
-          find sdk/bin/packages \
-            -type f \
-            -name 'libnet*.ipk' \
-            -exec cp {} output/ \; || true
+          IPK="$(
+            find bin/packages \
+              -type f \
+              -name 'dsniff_*.ipk' \
+              | head -1
+          )"
 
-          find sdk/bin/packages \
-            -type f \
-            -name 'libnids*.ipk' \
-            -exec cp {} output/ \; || true
+          test -n "$IPK"
+          test -f "$IPK"
 
-          cat > output/BUILD_INFO.txt <<EOF
-          Package: dsniff
-          Source: $GITHUB_REPOSITORY
-          Commit: $GITHUB_SHA
-          OpenWrt: $OPENWRT_VERSION
-          Target: $OPENWRT_TARGET
-          SDK: $SDK_ARCHIVE
-          Architecture: mipsel_24kc
-          EOF
+          echo "=== Package metadata ==="
 
-          echo "========================================"
-          echo "Final artifacts"
-          echo "========================================"
+          tar -xOf "$IPK" ./control.tar.gz \
+            | tar -xzOf - ./control \
+            | grep -E \
+              '^(Package|Version|Architecture|Depends):'
 
-          ls -lah output
+          echo "=== dsniff binary ==="
 
-      - name: Upload MT7621 artifacts
+          rm -rf /tmp/dsniff-check
+
+          mkdir -p /tmp/dsniff-check
+
+          tar -xOf "$IPK" ./data.tar.gz \
+            | tar -tzf - \
+            | grep -E \
+              'usr/sbin/(dsniff|macof|arpspoof)$' \
+              || true
+
+          tar -xOf "$IPK" ./data.tar.gz \
+            | tar -xzOf - ./usr/sbin/dsniff \
+            > /tmp/dsniff-check/dsniff
+
+          file /tmp/dsniff-check/dsniff
+
+          readelf -h /tmp/dsniff-check/dsniff \
+            | grep -E 'Class|Machine'
+
+      - name: Upload MT7621 IPK
         uses: actions/upload-artifact@v4
         with:
           name: dsniff-openwrt-23.05.5-mt7621
-          path: output/
+          path: |
+            ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
           if-no-files-found: error
           retention-days: 30
 
 
-  # ============================================================
-  # Target 2: Hyp537 / MediaTek Filogic
-  # OpenWrt 24.10.0
-  # ============================================================
-  dsniff-filogic:
-    name: dsniff - OpenWrt 24.10.0 - Filogic
-    runs-on: ubuntu-latest
+  build-filogic:
 
-    env:
-      OPENWRT_VERSION: "24.10.0"
-      OPENWRT_TARGET: "mediatek/filogic"
-      SDK_ARCHIVE: "openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-      SDK_SHA256: "d1dbcb4ffc21beae4da92e05aaab91b0ddfca95f12633205d0ed9ba9aecceb3b"
-      SDK_URL: "https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic/openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'filogic' || github.event.inputs.target == 'all' }}
+
+    name: dsniff - Filogic - OpenWrt 24.10.0
+
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout dsniff fork
+
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             build-essential \
             clang \
             flex \
             bison \
             gawk \
-            gcc \
-            g++ \
             gettext \
             git \
             libncurses-dev \
             libssl-dev \
+            python3 \
+            python3-pip \
+            python3-setuptools \
             rsync \
             unzip \
-            zlib1g-dev \
-            file \
             wget \
-            curl \
-            xz-utils \
             zstd \
-            python3 \
+            xz-utils \
+            file
 
-      - name: Download OpenWrt SDK
+      - name: Download OpenWrt 24.10.0 Filogic SDK
+        working-directory: ${{ runner.temp }}
         run: |
-          set -e
+          set -euo pipefail
 
-          mkdir -p sdk-download
-          cd sdk-download
+          SDK="openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          BASE="https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic"
 
-          echo "Downloading:"
-          echo "$SDK_URL"
+          wget -q --timeout=30 --tries=3 \
+            "$BASE/$SDK"
 
-          wget -q --show-progress "$SDK_URL"
+          wget -q --timeout=30 --tries=3 \
+            "$BASE/sha256sums"
 
-          echo "Checking SHA256..."
-          echo "$SDK_SHA256  $SDK_ARCHIVE" | sha256sum -c -
+          EXPECTED_SHA="$(
+            awk -v sdk="$SDK" '
+              {
+                file = $2
+                gsub(/\r/, "", file)
+                sub(/^\*/, "", file)
+                sub(/^\.\//, "", file)
 
-          echo "Extracting SDK..."
-          tar --use-compress-program=unzstd -xf "$SDK_ARCHIVE"
+                n = split(file, parts, "/")
 
-          SDK_DIR="$(find . -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n 1)"
+                if (n > 0)
+                  file = parts[n]
 
-          if [ -z "$SDK_DIR" ]; then
-            echo "ERROR: SDK directory was not found"
+                if (file == sdk) {
+                  print $1
+                  exit
+                }
+              }
+            ' sha256sums
+          )"
+
+          if [ -z "$EXPECTED_SHA" ]; then
+            echo "No checksum found for $SDK"
             exit 1
           fi
 
-          mv "$SDK_DIR" ../sdk
+          printf '%s  %s\n' \
+            "$EXPECTED_SHA" \
+            "$SDK" | sha256sum -c -
 
-      - name: Show SDK information
+          tar --zstd -xf "$SDK"
+
+          SDK_DIR="${SDK%.tar.zst}"
+
+          echo "SDK_DIR=$RUNNER_TEMP/$SDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Prepare dsniff package
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          mkdir -p "$SDK_DIR/package/dsniff"
 
-          echo "========================================"
-          echo "OpenWrt SDK information"
-          echo "========================================"
+          cp -a \
+            package/dsniff/. \
+            "$SDK_DIR/package/dsniff/"
 
-          echo "OpenWrt version:"
-          grep -E 'CONFIG_VERSION_NUMBER|CONFIG_VERSION_REPO' .config 2>/dev/null || true
+          echo "=== package/dsniff ==="
 
-          echo
-          echo "Target:"
-          grep -E 'CONFIG_TARGET_|CONFIG_ARCH' .config 2>/dev/null | head -40 || true
+          find \
+            "$SDK_DIR/package/dsniff" \
+            -maxdepth 3 \
+            -type f \
+            -print
 
-          echo
-          echo "Toolchain:"
-          ./staging_dir/host/bin/gcc --version || true
-
-          echo
-          echo "========================================"
-
-      - name: Install OpenWrt feeds
+      - name: Update feeds
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
-
-          cd sdk
+          set -eux
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Prepare dsniff package
+      - name: Verify required dependencies
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          echo "=== Berkeley DB ==="
 
-          mkdir -p package/feeds/custom/dsniff
+          ./scripts/feeds search libdb47 || true
 
-          cp -a "$GITHUB_WORKSPACE/openwrt/package/dsniff/." \
-                package/feeds/custom/dsniff/
-
-          echo "========================================"
-          echo "dsniff package definition"
-          echo "========================================"
-
-          find package/feeds/custom/dsniff -maxdepth 3 -type f -print
-
-          echo
-          sed -n '1,260p' package/feeds/custom/dsniff/Makefile
+          find feeds package \
+            -type f \
+            -path '*/db/Makefile' \
+            -print 2>/dev/null || true
 
       - name: Configure SDK
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          export TERM=xterm
 
-          make defconfig
+          yes "" | make defconfig
 
-      - name: Build dsniff package
+      - name: Build dsniff
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          make package/dsniff/clean V=s || true
 
-          make package/feeds/custom/dsniff/compile V=s -j"$(nproc)"
+          make package/dsniff/compile V=s
 
-      - name: Verify generated packages
+      - name: Verify package
+        working-directory: ${{ env.SDK_DIR }}
         run: |
-          set -e
+          set -eux
 
-          cd sdk
+          echo "=== IPK files ==="
 
-          echo "========================================"
-          echo "Generated IPK files"
-          echo "========================================"
-
-          find bin/packages -type f -name '*.ipk' -print | sort
-
-          echo
-          echo "dsniff packages:"
-          find bin/packages -type f -name 'dsniff*.ipk' -print
-
-          if ! find bin/packages -type f -name 'dsniff*.ipk' | grep -q .; then
-            echo "ERROR: No dsniff IPK was generated."
-            exit 1
-          fi
-
-      - name: Collect artifacts
-        run: |
-          set -e
-
-          rm -rf output
-          mkdir -p output
-
-          find sdk/bin/packages \
+          find bin/packages \
             -type f \
-            -name 'dsniff*.ipk' \
-            -exec cp {} output/ \;
+            -name 'dsniff_*.ipk' \
+            -print
 
-          find sdk/bin/packages \
-            -type f \
-            -name 'libnet*.ipk' \
-            -exec cp {} output/ \; || true
+          IPK="$(
+            find bin/packages \
+              -type f \
+              -name 'dsniff_*.ipk' \
+              | head -1
+          )"
 
-          find sdk/bin/packages \
-            -type f \
-            -name 'libnids*.ipk' \
-            -exec cp {} output/ \; || true
+          test -n "$IPK"
+          test -f "$IPK"
 
-          cat > output/BUILD_INFO.txt <<EOF
-          Package: dsniff
-          Source: $GITHUB_REPOSITORY
-          Commit: $GITHUB_SHA
-          OpenWrt: $OPENWRT_VERSION
-          Target: $OPENWRT_TARGET
-          SDK: $SDK_ARCHIVE
-          Architecture: aarch64_cortex-a53
-          EOF
+          echo "=== Package metadata ==="
 
-          echo "========================================"
-          echo "Final artifacts"
-          echo "========================================"
+          tar -xOf "$IPK" ./control.tar.gz \
+            | tar -xzOf - ./control \
+            | grep -E \
+              '^(Package|Version|Architecture|Depends):'
 
-          ls -lah output
+          echo "=== dsniff binary ==="
 
-      - name: Upload Filogic artifacts
+          rm -rf /tmp/dsniff-check
+
+          mkdir -p /tmp/dsniff-check
+
+          tar -xOf "$IPK" ./data.tar.gz \
+            | tar -tzf - \
+            | grep -E \
+              'usr/sbin/(dsniff|macof|arpspoof)$' \
+              || true
+
+          tar -xOf "$IPK" ./data.tar.gz \
+            | tar -xzOf - ./usr/sbin/dsniff \
+            > /tmp/dsniff-check/dsniff
+
+          file /tmp/dsniff-check/dsniff
+
+          readelf -h /tmp/dsniff-check/dsniff \
+            | grep -E 'Class|Machine'
+
+      - name: Upload Filogic IPK
         uses: actions/upload-artifact@v4
         with:
           name: dsniff-openwrt-24.10.0-filogic
-          path: output/
+          path: |
+            ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
           if-no-files-found: error
           retention-days: 30
