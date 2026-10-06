@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Which SDK to build (mt7621, filogic, all)'
-        required: false
-        default: 'filogic'
+        description: "Build target"
+        required: true
+        default: "filogic"
         type: choice
         options:
           - mt7621
@@ -17,27 +17,22 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
-
 jobs:
-
   build-mt7621:
-    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'mt7621' || github.event.inputs.target == 'all' }}
-
-    name: dsniff - MT7621 - OpenWrt 23.05.5
+    if: github.event_name == 'push' || github.event.inputs.target == 'mt7621' || github.event.inputs.target == 'all'
 
     runs-on: ubuntu-24.04
 
-    steps:
+    env:
+      SDK_DIR: ${{ github.workspace }}/openwrt-sdk
 
-      - name: Checkout
+    steps:
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
             build-essential \
             clang \
@@ -59,74 +54,40 @@ jobs:
             file
 
       - name: Download OpenWrt 23.05.5 MT7621 SDK
-        working-directory: ${{ runner.temp }}
-        run: |
-          set -euo pipefail
-
-          SDK="openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
-          BASE="https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt7621"
-
-          wget -q --timeout=30 --tries=3 \
-            "$BASE/$SDK"
-
-          wget -q --timeout=30 --tries=3 \
-            "$BASE/sha256sums"
-
-          EXPECTED_SHA="$(
-            awk -v sdk="$SDK" '
-              {
-                file = $2
-                gsub(/\r/, "", file)
-                sub(/^\*/, "", file)
-                sub(/^\.\//, "", file)
-
-                n = split(file, parts, "/")
-
-                if (n > 0)
-                  file = parts[n]
-
-                if (file == sdk) {
-                  print $1
-                  exit
-                }
-              }
-            ' sha256sums
-          )"
-
-          if [ -z "$EXPECTED_SHA" ]; then
-            echo "No checksum found for $SDK"
-            exit 1
-          fi
-
-          printf '%s  %s\n' \
-            "$EXPECTED_SHA" \
-            "$SDK" | sha256sum -c -
-
-          tar -xf "$SDK"
-
-          SDK_DIR="${SDK%.tar.xz}"
-
-          echo "SDK_DIR=$RUNNER_TEMP/$SDK_DIR" >> "$GITHUB_ENV"
-
-      - name: Prepare dsniff package
+        working-directory: ${{ github.workspace }}
         run: |
           set -eux
 
+          SDK_URL="https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt7621/openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+          SDK_FILE="${SDK_URL##*/}"
+
+          wget -q --show-progress "$SDK_URL"
+
+          wget -q "https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt7621/sha256sums"
+
+          grep "  $SDK_FILE\$" sha256sums | sha256sum -c -
+
+          rm -rf "$SDK_DIR"
+
+          mkdir -p "$SDK_DIR"
+
+          tar -xJf "$SDK_FILE" \
+            --strip-components=1 \
+            -C "$SDK_DIR"
+
+          echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Copy dsniff package
+        run: |
+          set -eux
+
+          rm -rf "$SDK_DIR/package/dsniff"
+
           mkdir -p "$SDK_DIR/package/dsniff"
 
-          cp -a \
-            package/dsniff/. \
-            "$SDK_DIR/package/dsniff/"
+          cp -a package/dsniff/. "$SDK_DIR/package/dsniff/"
 
-          echo "=== package/dsniff ==="
-
-          find \
-            "$SDK_DIR/package/dsniff" \
-            -maxdepth 3 \
-            -type f \
-            -print
-
-      - name: Update feeds
+      - name: Update OpenWrt feeds
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -eux
@@ -134,26 +95,87 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Verify required dependencies
+      - name: Enable Berkeley DB compat185
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -eux
 
-          echo "=== Berkeley DB ==="
+          echo "=== Locate Berkeley DB Makefile ==="
+
+          DB_MK="$(find feeds package \
+            -path '*/db/Makefile' \
+            -print -quit)"
+
+          echo "DB_MK=$DB_MK"
+
+          if [ -z "$DB_MK" ]; then
+            echo "ERROR: Berkeley DB Makefile not found"
+            exit 1
+          fi
+
+          echo
+          echo "=== Before modification ==="
+          grep -n "CONFIGURE_ARGS" "$DB_MK" || true
+          grep -n "enable-compat185" "$DB_MK" || true
+
+          echo
+          echo "=== Adding --enable-compat185 ==="
+
+          if grep -q -- "--enable-compat185" "$DB_MK"; then
+            echo "--enable-compat185 already present"
+          else
+            python3 - "$DB_MK" <<'PY'
+import sys
+
+path = sys.argv[1]
+
+with open(path, "r", encoding="utf-8") as f:
+    data = f.read()
+
+marker = "CONFIGURE_ARGS += \\"
+
+if marker not in data:
+    raise SystemExit(
+        "ERROR: Could not find 'CONFIGURE_ARGS +=' in Berkeley DB Makefile"
+    )
+
+data = data.replace(
+    marker,
+    marker + "\n\t--enable-compat185 \\",
+    1
+)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(data)
+PY
+          fi
+
+          echo
+          echo "=== After modification ==="
+          grep -n -A8 -B2 "CONFIGURE_ARGS" "$DB_MK" || true
+
+      - name: Show dsniff package Makefile
+        working-directory: ${{ env.SDK_DIR }}
+        run: |
+          set -eux
+
+          echo "========================================"
+          echo "dsniff Makefile actually used"
+          echo "========================================"
+
+          sed -n '1,240p' package/dsniff/Makefile
+
+          echo
+          echo "========================================"
+          echo "libdb47 feed"
+          echo "========================================"
 
           ./scripts/feeds search libdb47 || true
-
-          find feeds package \
-            -type f \
-            -path '*/db/Makefile' \
-            -print 2>/dev/null || true
 
       - name: Configure SDK
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -eux
-
-          export TERM=xterm
 
           yes "" | make defconfig
 
@@ -166,83 +188,60 @@ jobs:
 
           make package/dsniff/compile V=s
 
-      - name: Verify package
+      - name: Verify dsniff package
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -eux
 
-          echo "=== IPK files ==="
+          echo "=== Generated IPK files ==="
 
           find bin/packages \
             -type f \
             -name 'dsniff_*.ipk' \
             -print
 
-          IPK="$(
-            find bin/packages \
-              -type f \
-              -name 'dsniff_*.ipk' \
-              | head -1
-          )"
+          IPK="$(find bin/packages \
+            -type f \
+            -name 'dsniff_*.ipk' \
+            -print -quit)"
 
-          test -n "$IPK"
-          test -f "$IPK"
+          if [ -z "$IPK" ]; then
+            echo "ERROR: dsniff IPK was not generated"
+            exit 1
+          fi
 
+          echo
+          echo "=== IPK ==="
+          file "$IPK"
+
+          echo
           echo "=== Package metadata ==="
+          tar -xOf "$IPK" ./control.tar.gz | tar -xzOf - ./control
 
-          tar -xOf "$IPK" ./control.tar.gz \
-            | tar -xzOf - ./control \
-            | grep -E \
-              '^(Package|Version|Architecture|Depends):'
-
-          echo "=== dsniff binary ==="
-
-          rm -rf /tmp/dsniff-check
-
-          mkdir -p /tmp/dsniff-check
-
-          tar -xOf "$IPK" ./data.tar.gz \
-            | tar -tzf - \
-            | grep -E \
-              'usr/sbin/(dsniff|macof|arpspoof)$' \
-              || true
-
-          tar -xOf "$IPK" ./data.tar.gz \
-            | tar -xzOf - ./usr/sbin/dsniff \
-            > /tmp/dsniff-check/dsniff
-
-          file /tmp/dsniff-check/dsniff
-
-          readelf -h /tmp/dsniff-check/dsniff \
-            | grep -E 'Class|Machine'
-
-      - name: Upload MT7621 IPK
+      - name: Upload MT7621 artifact
         uses: actions/upload-artifact@v4
         with:
           name: dsniff-openwrt-23.05.5-mt7621
           path: |
             ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
           if-no-files-found: error
-          retention-days: 30
 
 
   build-filogic:
-
-    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'filogic' || github.event.inputs.target == 'all' }}
-
-    name: dsniff - Filogic - OpenWrt 24.10.0
+    if: github.event_name == 'push' || github.event.inputs.target == 'filogic' || github.event.inputs.target == 'all'
 
     runs-on: ubuntu-24.04
 
-    steps:
+    env:
+      SDK_DIR: ${{ github.workspace }}/openwrt-sdk
 
-      - name: Checkout
+    steps:
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
             build-essential \
             clang \
@@ -264,74 +263,40 @@ jobs:
             file
 
       - name: Download OpenWrt 24.10.0 Filogic SDK
-        working-directory: ${{ runner.temp }}
-        run: |
-          set -euo pipefail
-
-          SDK="openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          BASE="https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic"
-
-          wget -q --timeout=30 --tries=3 \
-            "$BASE/$SDK"
-
-          wget -q --timeout=30 --tries=3 \
-            "$BASE/sha256sums"
-
-          EXPECTED_SHA="$(
-            awk -v sdk="$SDK" '
-              {
-                file = $2
-                gsub(/\r/, "", file)
-                sub(/^\*/, "", file)
-                sub(/^\.\//, "", file)
-
-                n = split(file, parts, "/")
-
-                if (n > 0)
-                  file = parts[n]
-
-                if (file == sdk) {
-                  print $1
-                  exit
-                }
-              }
-            ' sha256sums
-          )"
-
-          if [ -z "$EXPECTED_SHA" ]; then
-            echo "No checksum found for $SDK"
-            exit 1
-          fi
-
-          printf '%s  %s\n' \
-            "$EXPECTED_SHA" \
-            "$SDK" | sha256sum -c -
-
-          tar --zstd -xf "$SDK"
-
-          SDK_DIR="${SDK%.tar.zst}"
-
-          echo "SDK_DIR=$RUNNER_TEMP/$SDK_DIR" >> "$GITHUB_ENV"
-
-      - name: Prepare dsniff package
+        working-directory: ${{ github.workspace }}
         run: |
           set -eux
 
+          SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic/openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          SDK_FILE="${SDK_URL##*/}"
+
+          wget -q --show-progress "$SDK_URL"
+
+          wget -q "https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic/sha256sums"
+
+          grep "  $SDK_FILE\$" sha256sums | sha256sum -c -
+
+          rm -rf "$SDK_DIR"
+
+          mkdir -p "$SDK_DIR"
+
+          tar --zstd -xf "$SDK_FILE" \
+            --strip-components=1 \
+            -C "$SDK_DIR"
+
+          echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Copy dsniff package
+        run: |
+          set -eux
+
+          rm -rf "$SDK_DIR/package/dsniff"
+
           mkdir -p "$SDK_DIR/package/dsniff"
 
-          cp -a \
-            package/dsniff/. \
-            "$SDK_DIR/package/dsniff/"
+          cp -a package/dsniff/. "$SDK_DIR/package/dsniff/"
 
-          echo "=== package/dsniff ==="
-
-          find \
-            "$SDK_DIR/package/dsniff" \
-            -maxdepth 3 \
-            -type f \
-            -print
-
-      - name: Update feeds
+      - name: Update OpenWrt feeds
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -eux
@@ -339,26 +304,87 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Verify required dependencies
+      - name: Enable Berkeley DB compat185
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -eux
 
-          echo "=== Berkeley DB ==="
+          echo "=== Locate Berkeley DB Makefile ==="
+
+          DB_MK="$(find feeds package \
+            -path '*/db/Makefile' \
+            -print -quit)"
+
+          echo "DB_MK=$DB_MK"
+
+          if [ -z "$DB_MK" ]; then
+            echo "ERROR: Berkeley DB Makefile not found"
+            exit 1
+          fi
+
+          echo
+          echo "=== Before modification ==="
+          grep -n "CONFIGURE_ARGS" "$DB_MK" || true
+          grep -n "enable-compat185" "$DB_MK" || true
+
+          echo
+          echo "=== Adding --enable-compat185 ==="
+
+          if grep -q -- "--enable-compat185" "$DB_MK"; then
+            echo "--enable-compat185 already present"
+          else
+            python3 - "$DB_MK" <<'PY'
+import sys
+
+path = sys.argv[1]
+
+with open(path, "r", encoding="utf-8") as f:
+    data = f.read()
+
+marker = "CONFIGURE_ARGS += \\"
+
+if marker not in data:
+    raise SystemExit(
+        "ERROR: Could not find 'CONFIGURE_ARGS +=' in Berkeley DB Makefile"
+    )
+
+data = data.replace(
+    marker,
+    marker + "\n\t--enable-compat185 \\",
+    1
+)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(data)
+PY
+          fi
+
+          echo
+          echo "=== After modification ==="
+          grep -n -A8 -B2 "CONFIGURE_ARGS" "$DB_MK" || true
+
+      - name: Show dsniff package Makefile
+        working-directory: ${{ env.SDK_DIR }}
+        run: |
+          set -eux
+
+          echo "========================================"
+          echo "dsniff Makefile actually used"
+          echo "========================================"
+
+          sed -n '1,240p' package/dsniff/Makefile
+
+          echo
+          echo "========================================"
+          echo "libdb47 feed"
+          echo "========================================"
 
           ./scripts/feeds search libdb47 || true
-
-          find feeds package \
-            -type f \
-            -path '*/db/Makefile' \
-            -print 2>/dev/null || true
 
       - name: Configure SDK
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -eux
-
-          export TERM=xterm
 
           yes "" | make defconfig
 
@@ -371,61 +397,40 @@ jobs:
 
           make package/dsniff/compile V=s
 
-      - name: Verify package
+      - name: Verify dsniff package
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -eux
 
-          echo "=== IPK files ==="
+          echo "=== Generated IPK files ==="
 
           find bin/packages \
             -type f \
             -name 'dsniff_*.ipk' \
             -print
 
-          IPK="$(
-            find bin/packages \
-              -type f \
-              -name 'dsniff_*.ipk' \
-              | head -1
-          )"
+          IPK="$(find bin/packages \
+            -type f \
+            -name 'dsniff_*.ipk' \
+            -print -quit)"
 
-          test -n "$IPK"
-          test -f "$IPK"
+          if [ -z "$IPK" ]; then
+            echo "ERROR: dsniff IPK was not generated"
+            exit 1
+          fi
 
+          echo
+          echo "=== IPK ==="
+          file "$IPK"
+
+          echo
           echo "=== Package metadata ==="
+          tar -xOf "$IPK" ./control.tar.gz | tar -xzOf - ./control
 
-          tar -xOf "$IPK" ./control.tar.gz \
-            | tar -xzOf - ./control \
-            | grep -E \
-              '^(Package|Version|Architecture|Depends):'
-
-          echo "=== dsniff binary ==="
-
-          rm -rf /tmp/dsniff-check
-
-          mkdir -p /tmp/dsniff-check
-
-          tar -xOf "$IPK" ./data.tar.gz \
-            | tar -tzf - \
-            | grep -E \
-              'usr/sbin/(dsniff|macof|arpspoof)$' \
-              || true
-
-          tar -xOf "$IPK" ./data.tar.gz \
-            | tar -xzOf - ./usr/sbin/dsniff \
-            > /tmp/dsniff-check/dsniff
-
-          file /tmp/dsniff-check/dsniff
-
-          readelf -h /tmp/dsniff-check/dsniff \
-            | grep -E 'Class|Machine'
-
-      - name: Upload Filogic IPK
+      - name: Upload Filogic artifact
         uses: actions/upload-artifact@v4
         with:
           name: dsniff-openwrt-24.10.0-filogic
           path: |
             ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
           if-no-files-found: error
-          retention-days: 30
