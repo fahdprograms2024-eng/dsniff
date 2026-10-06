@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Build target"
+        description: Build target
         required: true
-        default: "filogic"
+        default: filogic
         type: choice
         options:
           - mt7621
@@ -68,7 +68,6 @@ jobs:
           grep "  $SDK_FILE\$" sha256sums | sha256sum -c -
 
           rm -rf "$SDK_DIR"
-
           mkdir -p "$SDK_DIR"
 
           tar -xJf "$SDK_FILE" \
@@ -82,7 +81,6 @@ jobs:
           set -eux
 
           rm -rf "$SDK_DIR/package/dsniff"
-
           mkdir -p "$SDK_DIR/package/dsniff"
 
           cp -a package/dsniff/. "$SDK_DIR/package/dsniff/"
@@ -102,9 +100,7 @@ jobs:
 
           echo "=== Locate Berkeley DB Makefile ==="
 
-          DB_MK="$(find feeds package \
-            -path '*/db/Makefile' \
-            -print -quit)"
+          DB_MK="$(find feeds package -path '*/db/Makefile' -print -quit)"
 
           echo "DB_MK=$DB_MK"
 
@@ -115,39 +111,12 @@ jobs:
 
           echo
           echo "=== Before modification ==="
-          grep -n "CONFIGURE_ARGS" "$DB_MK" || true
           grep -n "enable-compat185" "$DB_MK" || true
-
-          echo
-          echo "=== Adding --enable-compat185 ==="
 
           if grep -q -- "--enable-compat185" "$DB_MK"; then
             echo "--enable-compat185 already present"
           else
-            python3 - "$DB_MK" <<'PY'
-import sys
-
-path = sys.argv[1]
-
-with open(path, "r", encoding="utf-8") as f:
-    data = f.read()
-
-marker = "CONFIGURE_ARGS += \\"
-
-if marker not in data:
-    raise SystemExit(
-        "ERROR: Could not find 'CONFIGURE_ARGS +=' in Berkeley DB Makefile"
-    )
-
-data = data.replace(
-    marker,
-    marker + "\n\t--enable-compat185 \\",
-    1
-)
-
-with open(path, "w", encoding="utf-8") as f:
-    f.write(data)
-PY
+            sed -i '/CONFIGURE_ARGS += \\/a\	--enable-compat185 \\' "$DB_MK"
           fi
 
           echo
@@ -159,17 +128,11 @@ PY
         run: |
           set -eux
 
-          echo "========================================"
-          echo "dsniff Makefile actually used"
-          echo "========================================"
-
+          echo "=== dsniff Makefile ==="
           sed -n '1,240p' package/dsniff/Makefile
 
           echo
-          echo "========================================"
-          echo "libdb47 feed"
-          echo "========================================"
-
+          echo "=== libdb47 ==="
           ./scripts/feeds search libdb47 || true
 
       - name: Configure SDK
@@ -185,7 +148,6 @@ PY
           set -eux
 
           make package/dsniff/clean V=s || true
-
           make package/dsniff/compile V=s
 
       - name: Verify dsniff package
@@ -222,8 +184,7 @@ PY
         uses: actions/upload-artifact@v4
         with:
           name: dsniff-openwrt-23.05.5-mt7621
-          path: |
-            ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
+          path: ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
           if-no-files-found: error
 
 
@@ -277,7 +238,6 @@ PY
           grep "  $SDK_FILE\$" sha256sums | sha256sum -c -
 
           rm -rf "$SDK_DIR"
-
           mkdir -p "$SDK_DIR"
 
           tar --zstd -xf "$SDK_FILE" \
@@ -291,7 +251,6 @@ PY
           set -eux
 
           rm -rf "$SDK_DIR/package/dsniff"
-
           mkdir -p "$SDK_DIR/package/dsniff"
 
           cp -a package/dsniff/. "$SDK_DIR/package/dsniff/"
@@ -311,9 +270,7 @@ PY
 
           echo "=== Locate Berkeley DB Makefile ==="
 
-          DB_MK="$(find feeds package \
-            -path '*/db/Makefile' \
-            -print -quit)"
+          DB_MK="$(find feeds package -path '*/db/Makefile' -print -quit)"
 
           echo "DB_MK=$DB_MK"
 
@@ -324,39 +281,12 @@ PY
 
           echo
           echo "=== Before modification ==="
-          grep -n "CONFIGURE_ARGS" "$DB_MK" || true
           grep -n "enable-compat185" "$DB_MK" || true
-
-          echo
-          echo "=== Adding --enable-compat185 ==="
 
           if grep -q -- "--enable-compat185" "$DB_MK"; then
             echo "--enable-compat185 already present"
           else
-            python3 - "$DB_MK" <<'PY'
-import sys
-
-path = sys.argv[1]
-
-with open(path, "r", encoding="utf-8") as f:
-    data = f.read()
-
-marker = "CONFIGURE_ARGS += \\"
-
-if marker not in data:
-    raise SystemExit(
-        "ERROR: Could not find 'CONFIGURE_ARGS +=' in Berkeley DB Makefile"
-    )
-
-data = data.replace(
-    marker,
-    marker + "\n\t--enable-compat185 \\",
-    1
-)
-
-with open(path, "w", encoding="utf-8") as f:
-    f.write(data)
-PY
+            sed -i '/CONFIGURE_ARGS += \\/a\	--enable-compat185 \\' "$DB_MK"
           fi
 
           echo
@@ -368,17 +298,11 @@ PY
         run: |
           set -eux
 
-          echo "========================================"
-          echo "dsniff Makefile actually used"
-          echo "========================================"
-
+          echo "=== dsniff Makefile ==="
           sed -n '1,240p' package/dsniff/Makefile
 
           echo
-          echo "========================================"
-          echo "libdb47 feed"
-          echo "========================================"
-
+          echo "=== libdb47 ==="
           ./scripts/feeds search libdb47 || true
 
       - name: Configure SDK
@@ -394,7 +318,6 @@ PY
           set -eux
 
           make package/dsniff/clean V=s || true
-
           make package/dsniff/compile V=s
 
       - name: Verify dsniff package
@@ -431,6 +354,5 @@ PY
         uses: actions/upload-artifact@v4
         with:
           name: dsniff-openwrt-24.10.0-filogic
-          path: |
-            ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
+          path: ${{ env.SDK_DIR }}/bin/packages/**/*.ipk
           if-no-files-found: error
