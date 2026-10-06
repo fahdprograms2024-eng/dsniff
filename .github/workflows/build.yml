@@ -60,12 +60,22 @@ jobs:
 
           SDK_URL="https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt7621/openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
           SDK_FILE="${SDK_URL##*/}"
+          EXPECTED_SHA256="97ac89bcd590cf882bad8e027d893ab073959628b69e9e43829a2ccfb1e11e29"
 
           wget -q --show-progress "$SDK_URL"
 
-          wget -q "https://downloads.openwrt.org/releases/23.05.5/targets/ramips/mt7621/sha256sums"
+          echo "=== SHA256 verification ==="
+          ACTUAL_SHA256="$(sha256sum "$SDK_FILE" | awk '{print $1}')"
 
-          grep "  $SDK_FILE\$" sha256sums | sha256sum -c -
+          echo "Expected: $EXPECTED_SHA256"
+          echo "Actual:   $ACTUAL_SHA256"
+
+          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+            echo "ERROR: SHA256 mismatch"
+            exit 1
+          fi
+
+          echo "SHA256 OK"
 
           rm -rf "$SDK_DIR"
           mkdir -p "$SDK_DIR"
@@ -230,12 +240,22 @@ jobs:
 
           SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic/openwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           SDK_FILE="${SDK_URL##*/}"
+          EXPECTED_SHA256="d1dbcb4ffc21beae4da92e05aaab91b0ddfca95f12633205d0ed9ba9aecceb3b"
 
           wget -q --show-progress "$SDK_URL"
 
-          wget -q "https://downloads.openwrt.org/releases/24.10.0/targets/mediatek/filogic/sha256sums"
+          echo "=== SHA256 verification ==="
+          ACTUAL_SHA256="$(sha256sum "$SDK_FILE" | awk '{print $1}')"
 
-          grep "  $SDK_FILE\$" sha256sums | sha256sum -c -
+          echo "Expected: $EXPECTED_SHA256"
+          echo "Actual:   $ACTUAL_SHA256"
+
+          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+            echo "ERROR: SHA256 mismatch"
+            exit 1
+          fi
+
+          echo "SHA256 OK"
 
           rm -rf "$SDK_DIR"
           mkdir -p "$SDK_DIR"
